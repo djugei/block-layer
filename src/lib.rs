@@ -41,7 +41,7 @@ const BUF_SIZE: usize = 4096 - 2 - PTR_SIZE;
 /// a single, page-sized chunk.
 /// you can use this directly, or through a ChunkIndex
 /// if you need random access.
-#[repr(C)]
+#[repr(C, align(4096))]
 pub struct Chunk<T> {
     /// where the user data is actually stored
     /// 4096 - 2 - 8
@@ -54,25 +54,28 @@ pub struct Chunk<T> {
 impl<T> Chunk<T> {
     /// pass in an unititialized chunk of memory
     /// get out a Chunk
-    pub fn new(mut store: MaybeUninit<[u8; 4096]>) -> Self {
+    pub fn new(mut store: MaybeUninit<Self>) -> Self {
         // 1) get the offsets
-        let store_ptr = store.as_mut_ptr();
+        let store_ptr = store.as_mut_ptr() as *mut u8;
+
+        let align = store_ptr as usize;
+        dbg!(align, store_ptr);
 
         let buf_ptr = store_ptr;
 
-        let len_ptr = store_ptr;
         // offset to "len" field
         // this is safe because its within the allocation
-        unsafe { len_ptr.add(BUF_SIZE) };
+        let len_ptr = unsafe { store_ptr.add(BUF_SIZE) };
 
-        let next_ptr = len_ptr.clone();
         // offset to "next" field
         // again, safe because inside the same allocation
-        unsafe { next_ptr.add(2) };
+        let next_ptr = unsafe { len_ptr.add(2) };
 
         let buf_ptr = buf_ptr as *mut u8;
         let len_ptr = len_ptr as *mut u16;
         let next_ptr = next_ptr as *mut Option<Box<Self>>;
+
+        dbg!(buf_ptr, len_ptr, next_ptr);
 
         // 3) initialize
         unsafe {
@@ -154,6 +157,13 @@ impl<T> Chunk<T> {
     }
 }
 
+impl<T> Drop for Chunk<T> {
+    // gotta drop all initialized data
+    fn drop(&mut self) {
+        while let Some(_) = self.pop() {}
+    }
+}
+
 impl<T> Deref for Chunk<T> {
     type Target = [T];
     fn deref(&self) -> &Self::Target {
@@ -182,11 +192,12 @@ fn sizes() {
 
 #[test]
 fn push_pop() {
-    let store = MaybeUninit::uninit();
+    let store = Box::new(MaybeUninit::uninit());
 
-    let mut chunk = Chunk::new(store);
+    let mut chunk = Chunk::new(*store);
+    assert_eq!(chunk.capacity(), BUF_SIZE / std::mem::size_of::<usize>());
 
-    for i in 0..chunk.capacity() {
+    for i in 0usize..chunk.capacity() {
         assert_eq!(chunk.push(i), None);
     }
     assert_eq!(chunk.push(0), Some(0));
