@@ -15,13 +15,23 @@ const BUF_SIZE: usize = 4096 - 2 - PTR_SIZE;
 /// a single, page-sized chunk.
 /// you can use this directly, or through a ChunkIndex
 /// if you need random access.
+///
+/// contains a pointer to the next chunk
+/// but that is only informational.
+/// it does not own the next chunk.
+/// you should put the chunks into a container
+/// which then actually owns them.
 #[repr(C, align(4096))]
 pub struct Chunk<T> {
     /// where the user data is actually stored
     /// 4096 - 2 - 8
     buf: [u8; BUF_SIZE],
     len: u16,
-    next: Option<Box<Self>>,
+    // important implementor note!
+    // don't ever create a &mut from this
+    // probably also don't ever create a & from this
+    // this is not owned by the chunk, its only here for informational purposes!
+    pub(crate) next: *mut Self,
     phantom: PhantomData<T>,
 }
 
@@ -56,7 +66,7 @@ impl<T> Chunk<T> {
         // 2) turn into the right pointer types
         let buf_ptr = buf_ptr as *mut u8;
         let len_ptr = len_ptr as *mut u16;
-        let next_ptr = next_ptr as *mut Option<Box<Self>>;
+        let next_ptr = next_ptr as *mut *mut Self;
 
         // 3) initialize
         unsafe {
@@ -66,7 +76,7 @@ impl<T> Chunk<T> {
         }
         // the alignment must always work out because we don't allow for pointer sizes < 16
         unsafe { len_ptr.write(0u16) };
-        unsafe { next_ptr.write(None) };
+        unsafe { next_ptr.write(std::ptr::null_mut()) };
 
         // buf has been zero-initialized
         // the length and the next pointer have just been initialized
@@ -206,35 +216,40 @@ impl<T> Chunk<T> {
     /// If other was partially initialized before those parts will be overwritten,
     /// not dropped
     /// if index > self.len() then this panics
-    /// returns a reference other.
-    pub fn split(&mut self, mut other: Box<MaybeUninit<Self>>, index: usize) -> &mut Self {
+    /// returns a pointer to other.
+    /// The caller is responsible for managing it.
+    /// i.e. if you don't drop it nobody will.
+    pub fn split(&mut self, mut other: Box<MaybeUninit<Self>>, index: usize) -> *mut Self {
         Self::initialize(&mut *other);
         // safe because initialize guarantees initialization
         let mut other: Box<Self> = unsafe { other.assume_init() };
-        let own = self.as_uninit_slice();
-        let theirs = other.as_uninit_slice_mut();
-        let source = &own[index..self.len()];
-        let target = &mut theirs[0..source.len()];
+        {
+            let own = self.as_uninit_slice();
+            let theirs = other.as_uninit_slice_mut();
+            let source = &own[index..self.len()];
+            let target = &mut theirs[0..source.len()];
 
-        assert_eq!(source.len(), target.len());
+            assert_eq!(source.len(), target.len());
 
-        // what we are basically trying to do:
-        // target.copy_from_slice(source);
-        // but MaybeUninit does not implement Copy, even though it should
-        let len = source.len();
-        let source = source.as_ptr();
-        let target = target.as_mut_ptr();
-        // this is ok, we checked the lengths and everything
-        unsafe { source.copy_to_nonoverlapping(target, len) };
-        self.len -= len as u16;
-        other.len = len as u16;
+            // what we are basically trying to do:
+            // target.copy_from_slice(source);
+            // but MaybeUninit does not implement Copy, even though it should
+            let len = source.len();
+            let source = source.as_ptr();
+            let target = target.as_mut_ptr();
+            // this is ok, we checked the lengths and everything
+            unsafe { source.copy_to_nonoverlapping(target, len) };
+            self.len -= len as u16;
+            other.len = len as u16;
+        }
 
         // fix up the pointers:
         // we need to point to other, other needs to point to our next
         std::mem::swap(&mut self.next, &mut other.next);
 
-        self.next = Some(other);
-        self.next.as_mut().unwrap()
+        let other = Box::into_raw(other);
+        self.next = other;
+        other
     }
 }
 
@@ -243,6 +258,7 @@ impl<T> Drop for Chunk<T> {
     fn drop(&mut self) {
         while let Some(_) = self.pop() {}
     }
+    // will not drop next!
 }
 
 impl<T> Deref for Chunk<T> {
@@ -270,8 +286,6 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Chunk<T> {
         f.debug_list().entries(slice).finish()
     }
 }
-
-// todo:chunk-index
 
 #[test]
 fn sizes() {
@@ -319,8 +333,6 @@ fn insert_remove() {
     assert_eq!(chunk.insert(last, 666), None);
     assert_eq!(chunk[last], 666u128);
     assert_eq!(chunk.remove(last), Some(666));
-
-    //todo: check extremes (push/op at end)
 }
 
 #[test]
@@ -339,17 +351,37 @@ fn split() {
         for i in 0u128..(chunk.capacity()) as u128 {
             assert_eq!(chunk.push(i), None);
         }
+
         let store = Box::new(MaybeUninit::uninit());
         let new = chunk.split(store, s);
+        {
+            // this is ok, we own the chunk, which has the pointer
+            // which won't get dropped or mutated
+            // we are not mutating it either.
+            let newref = unsafe { new.as_mut().unwrap() };
 
-        assert_eq!(new.len() + chunk.len(), capacity);
-        assert_eq!(chunk.len(), s);
+            assert_eq!(newref.len() + chunk.len(), capacity);
+            assert_eq!(chunk.len(), s);
+
+            let remain = newref.capacity() - newref.len();
+
+            for _ in 0..remain {
+                assert_eq!(newref.push(s as u128), None);
+            }
+        }
+        // chunk is not responsible for dropping new, we are.
+        // otherwise this would leak
+        unsafe { Box::from_raw(new) };
     }
     // check that splits at 0 for 0-sized chunks also work.
     let store = Box::new(MaybeUninit::uninit());
     let new = chunk.split(store, 0);
-    assert_eq!(new.len(), chunk.len());
-    assert_eq!(chunk.len(), 0);
+    {
+        let new = unsafe { new.as_ref().unwrap() };
+        assert_eq!(new.len(), chunk.len());
+        assert_eq!(chunk.len(), 0);
+    }
+    unsafe { Box::from_raw(new) };
 }
 
 #[test]
@@ -359,5 +391,6 @@ fn split_oob() {
     let mut chunk: Chunk<u128> = Chunk::new(*store);
 
     let store = Box::new(MaybeUninit::uninit());
-    let _new = chunk.split(store, 1);
+    let new = chunk.split(store, 1);
+    unsafe { Box::from_raw(new) };
 }

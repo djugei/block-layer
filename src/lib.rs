@@ -27,3 +27,7 @@
 
 mod chunk;
 pub use chunk::Chunk;
+
+mod index;
+pub use index::ChainIndex;
+//pub use index::FlatIndex;
