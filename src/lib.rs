@@ -1,4 +1,5 @@
 #![feature(maybe_uninit_extra)]
+#![feature(new_uninit)]
 //! A List of singly-linked Chunks.
 //!
 //! Each Chunk contains multiple Elements of the stored data type.
@@ -69,10 +70,6 @@ impl<T> Chunk<T> {
         assert!(std::mem::align_of::<T>() <= 4096);
         // 1) get the offsets
         let store_ptr = store.as_mut_ptr() as *mut MaybeUninit<u8>;
-
-        let align = store_ptr as usize;
-        dbg!(align, store_ptr);
-
         let buf_ptr = store_ptr;
 
         // offset to "len" field
@@ -229,6 +226,43 @@ impl<T> Chunk<T> {
         let (_pre, values, _post) = unsafe { self.buf.align_to_mut() };
         values
     }
+
+    /// Split self at index.
+    /// Everything < index stays in self, everything >= goes into other.
+    /// Other will be overwritten and fully initialized.
+    /// If other was partially initialized before those parts will be overwritten,
+    /// not dropped
+    /// if index > self.len() then this panics
+    /// returns a reference other.
+    pub fn split(&mut self, mut other: Box<MaybeUninit<Self>>, index: usize) -> &mut Self {
+        Self::initialize(&mut *other);
+        // safe because initialize guarantees initialization
+        let mut other: Box<Self> = unsafe { other.assume_init() };
+        let own = self.as_uninit_slice();
+        let theirs = other.as_uninit_slice_mut();
+        let source = &own[index..self.len()];
+        let target = &mut theirs[0..source.len()];
+
+        assert_eq!(source.len(), target.len());
+
+        // what we are basically trying to do:
+        // target.copy_from_slice(source);
+        // but MaybeUninit does not implement Copy, even though it should
+        let len = source.len();
+        let source = source.as_ptr();
+        let target = target.as_mut_ptr();
+        // this is ok, we checked the lengths and everything
+        unsafe { source.copy_to_nonoverlapping(target, len) };
+        self.len -= len as u16;
+        other.len = len as u16;
+
+        // fix up the pointers:
+        // we need to point to other, other needs to point to our next
+        std::mem::swap(&mut self.next, &mut other.next);
+
+        self.next = Some(other);
+        self.next.as_mut().unwrap()
+    }
 }
 
 impl<T> Drop for Chunk<T> {
@@ -254,6 +288,13 @@ impl<T> DerefMut for Chunk<T> {
 
         // safe because self.len is guaranteed to actually represent the initialized len.
         unsafe { std::slice::from_raw_parts_mut(base, self.len as usize) }
+    }
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for Chunk<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let slice: &[T] = self;
+        f.debug_list().entries(slice).finish()
     }
 }
 
@@ -307,4 +348,43 @@ fn insert_remove() {
     assert_eq!(chunk.remove(last), Some(666));
 
     //todo: check extremes (push/op at end)
+}
+
+#[test]
+fn split() {
+    let store = Box::new(MaybeUninit::uninit());
+    let mut chunk: Chunk<u128> = Chunk::new(*store);
+    let capacity = chunk.capacity();
+
+    // only test a few because miri isn't very fast
+    for s in (0..capacity)
+        .step_by(32)
+        .chain(std::iter::once(capacity - 1))
+    {
+        let store = Box::new(MaybeUninit::uninit());
+        let mut chunk = Chunk::new(*store);
+        for i in 0u128..(chunk.capacity()) as u128 {
+            assert_eq!(chunk.push(i), None);
+        }
+        let store = Box::new(MaybeUninit::uninit());
+        let new = chunk.split(store, s);
+
+        assert_eq!(new.len() + chunk.len(), capacity);
+        assert_eq!(chunk.len(), s);
+    }
+    // check that splits at 0 for 0-sized chunks also work.
+    let store = Box::new(MaybeUninit::uninit());
+    let new = chunk.split(store, 0);
+    assert_eq!(new.len(), chunk.len());
+    assert_eq!(chunk.len(), 0);
+}
+
+#[test]
+#[should_panic]
+fn split_oob() {
+    let store = Box::new(MaybeUninit::uninit());
+    let mut chunk: Chunk<u128> = Chunk::new(*store);
+
+    let store = Box::new(MaybeUninit::uninit());
+    let _new = chunk.split(store, 1);
 }
