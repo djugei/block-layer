@@ -52,11 +52,23 @@ pub struct Chunk<T> {
 }
 
 impl<T> Chunk<T> {
-    /// pass in an unititialized chunk of memory
+    /// Pass in an unititialized chunk of memory
     /// get out a Chunk
     pub fn new(mut store: MaybeUninit<Self>) -> Self {
+        Chunk::initialize(&mut store);
+        // the initialize function guarantees that it fully
+        // initializes the store.
+        // therefore this is safe.
+        unsafe { store.assume_init() }
+    }
+
+    /// After a call to initialize the whole struct ist guaranteed to be initialized.
+    /// If the passed struct was partially initialized before, drops will not be called.
+    pub fn initialize(store: &mut MaybeUninit<Self>) {
+        assert!(std::mem::size_of::<T>() <= BUF_SIZE);
+        assert!(std::mem::align_of::<T>() <= 4096);
         // 1) get the offsets
-        let store_ptr = store.as_mut_ptr() as *mut u8;
+        let store_ptr = store.as_mut_ptr() as *mut MaybeUninit<u8>;
 
         let align = store_ptr as usize;
         dbg!(align, store_ptr);
@@ -71,11 +83,10 @@ impl<T> Chunk<T> {
         // again, safe because inside the same allocation
         let next_ptr = unsafe { len_ptr.add(2) };
 
+        // 2) turn into the right pointer types
         let buf_ptr = buf_ptr as *mut u8;
         let len_ptr = len_ptr as *mut u16;
         let next_ptr = next_ptr as *mut Option<Box<Self>>;
-
-        dbg!(buf_ptr, len_ptr, next_ptr);
 
         // 3) initialize
         unsafe {
@@ -91,8 +102,7 @@ impl<T> Chunk<T> {
         // the length and the next pointer have just been initialized
         // phantom is a ZST
         // Chunk is repr(C)
-        // so this transmute is safe.
-        unsafe { std::mem::transmute(store) }
+        // so things are correctly initialized now and we are done.
     }
 
     /// pushes a value, unless the list is full
@@ -110,7 +120,7 @@ impl<T> Chunk<T> {
         }
     }
 
-    // pops the last value
+    /// pops the last value
     pub fn pop(&mut self) -> Option<T> {
         if self.len == 0 {
             return None;
@@ -131,15 +141,79 @@ impl<T> Chunk<T> {
         Some(value)
     }
 
+    /// total (not remaining) capacity in this chunk
     pub fn capacity(&self) -> usize {
         self.as_uninit_slice().len()
     }
 
+    /// number of elements in this chunk
     pub fn len(&self) -> usize {
         self.len as usize
     }
 
-    //todo: del, insert
+    /// inserts element at index, shifting all following elements up by one.
+    /// if there is not enough space in this chunk the element is returned
+    pub fn insert(&mut self, index: usize, element: T) -> Option<T> {
+        let len = self.len as usize;
+        let index_in_bounds = index <= len;
+        let has_space = len < self.capacity();
+        if index_in_bounds && has_space {
+            let values = self.as_uninit_slice_mut();
+            let insert_index = &mut values[index] as *mut MaybeUninit<T>;
+            // this is safe because the pointer is allowed to go one past
+            // in which case this will copy 0 elements
+            let copy_target = unsafe { insert_index.add(1) };
+            let remainder = len - index;
+
+            // this is safe: we just checked the capacity is enough to fit one more
+            // element, we are just shifting everything up by one
+            unsafe { std::ptr::copy(insert_index, copy_target, remainder) }
+
+            // we made space at the index, time to put in the new element
+            values[index].write(element);
+
+            self.len += 1;
+            None
+        } else {
+            Some(element)
+        }
+    }
+
+    /// removes and returns element at indxe
+    /// if index is out of bounds, returns None
+    pub fn remove(&mut self, index: usize) -> Option<T> {
+        let len = self.len() as usize;
+        if index < len {
+            let mut val = MaybeUninit::uninit();
+            let values = self.as_uninit_slice_mut();
+
+            std::mem::swap(&mut val, &mut values[index]);
+            // we checked that index is < len, so values[index] is initialized
+            // we swapped the initialized value out into val
+            // so now val is initialized and values[index] is not.
+            let val = unsafe { val.assume_init() };
+
+            // time to fix up the values
+            let copy_target = &mut values[index] as *mut MaybeUninit<T>;
+            // this is safe because the pointer is allowed to go one past
+            // in which case this will copy 0 elements
+            let copy_source = unsafe { copy_target.add(1) };
+
+            // we start at index+1
+            let remainder = len - (index + 1);
+
+            // this is safe, we stay within bounds and are just shrinking
+            unsafe { std::ptr::copy(copy_source, copy_target, remainder) };
+
+            self.len -= 1;
+
+            Some(val)
+        } else {
+            None
+        }
+    }
+
+    //todo: del, split
 
     pub fn as_uninit_slice(&self) -> &[MaybeUninit<T>] {
         // this is "safe" because we only transmute it to MaybeUninit
@@ -183,7 +257,7 @@ impl<T> DerefMut for Chunk<T> {
     }
 }
 
-// todo:index
+// todo:chunk-index
 
 #[test]
 fn sizes() {
@@ -206,4 +280,31 @@ fn push_pop() {
         assert!(chunk.pop().is_some());
     }
     assert_eq!(chunk.pop(), None);
+}
+
+#[test]
+fn insert_remove() {
+    let store = Box::new(MaybeUninit::uninit());
+
+    let mut chunk = Chunk::new(*store);
+
+    for i in 0u128..(chunk.capacity() - 1) as u128 {
+        assert_eq!(chunk.push(i), None);
+    }
+
+    assert_eq!(chunk.insert(3, 666u128), None);
+    assert_eq!(chunk.insert(3, 666u128), Some(666));
+    assert_eq!(chunk[3], 666u128);
+
+    assert_eq!(chunk.remove(3), Some(666));
+
+    // extreme cases
+
+    let last = chunk.len();
+    dbg!(chunk.capacity(), last, chunk.len(), chunk.len);
+    assert_eq!(chunk.insert(last, 666), None);
+    assert_eq!(chunk[last], 666u128);
+    assert_eq!(chunk.remove(last), Some(666));
+
+    //todo: check extremes (push/op at end)
 }
