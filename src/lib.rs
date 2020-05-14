@@ -1,4 +1,5 @@
 #![feature(maybe_uninit_extra)]
+#![feature(maybe_uninit_ref)]
 #![feature(new_uninit)]
 //! A List of singly-linked Chunks.
 //!

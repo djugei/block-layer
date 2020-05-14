@@ -2,6 +2,9 @@ use crate::chunk::Chunk;
 
 /// Not really an index, just accesses the Chunks chained.
 /// Contains a pointer to the first Chunk and thats it.
+///
+/// This is just the "anchor" every interesting operation is implemented on the
+/// Iterator.
 pub struct ChainIndex<T> {
     start: *mut Chunk<T>,
 }
@@ -38,13 +41,17 @@ impl<'a, T> Iterator for ChainIndexIterator<'a, T> {
         // and  we hold a ref to it so lifetimes work out
         let chunk_ref = unsafe { self.chunk.as_ref() };
         if let Some(chunk) = chunk_ref {
-            self.chunk = chunk.next;
+            // inside a ChainIndex Chunks contain a pointer as their next_hint.
+            self.chunk = chunk.next_hint as *const _;
             Some(chunk)
         } else {
             None
         }
     }
 }
+
+//todo: iter_mut
+//todo: iter_mut with sub-iterators (starting at current position, borrowing from iter_mut) and mutation.
 
 // fixme: tests for the iterator
 
