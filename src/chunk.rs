@@ -28,6 +28,7 @@ pub struct Chunk<T> {
     /// 4096 - 2 - 8
     buf: [u8; BUF_SIZE],
     len: u16,
+    // maybe have next_hint be a generic
     /// this is a pointer-sized hint on what the next chunk may be
     /// depending on usage this may be a pointer
     /// or an offset for example
