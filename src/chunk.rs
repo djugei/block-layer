@@ -38,6 +38,7 @@ pub struct Chunk<T> {
 impl<T> Chunk<T> {
     /// Pass in an unititialized chunk of memory
     /// get out a Chunk
+    #[inline]
     pub fn new(mut store: MaybeUninit<Self>) -> Self {
         Chunk::initialize(&mut store);
         // the initialize function guarantees that it fully
@@ -210,6 +211,9 @@ impl<T> Chunk<T> {
         values
     }
 
+    // todo: maybe this api is not great cause we need to pass the id and the thing
+    // at the same time. not a problem for offsets, but not so great for pointers.
+    // not sure how to fix that up though
     /// Split self at index.
     /// Everything < index stays in self, everything >= goes into other.
     /// Other will be overwritten and fully initialized.
