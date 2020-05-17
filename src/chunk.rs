@@ -28,7 +28,8 @@ pub struct Chunk<T> {
     /// 4096 - 2 - 8
     buf: [u8; BUF_SIZE],
     len: u16,
-    // maybe have next_hint be a generic
+    // todo: figure out how to make this generic without infinite
+    // type recursion
     /// this is a pointer-sized hint on what the next chunk may be
     /// depending on usage this may be a pointer
     /// or an offset for example
@@ -36,7 +37,7 @@ pub struct Chunk<T> {
 }
 
 impl<T> Chunk<T> {
-    /// Pass in an unititialized chunk of memory
+    /// Pass in an uninitialized chunk of memory
     /// get out a Chunk
     #[inline]
     pub fn new(mut store: MaybeUninit<Self>) -> Self {
