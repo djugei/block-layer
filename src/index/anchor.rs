@@ -42,6 +42,14 @@ impl<T> Anchor<T> {
             start: Box::into_raw(b),
         }
     }
+
+    /// The regular Iterator interface can not be implemented by
+    /// AnchorIteratorMut because it needs to enforce
+    /// that each item is gone before the next is returned.
+    /// The lifetimes around Iterator::next() do not allow for that.
+    pub fn iter_mut(&mut self) -> AnchorIteratorMut<T> {
+        AnchorIteratorMut::new(self)
+    }
 }
 
 impl<'a, T> IntoIterator for &'a Anchor<T> {
@@ -81,15 +89,6 @@ impl<'a, T> Iterator for AnchorIterator<'a, T> {
         } else {
             None
         }
-    }
-}
-
-impl<'a, T> IntoIterator for &'a mut Anchor<T> {
-    type Item = &'a mut ChunkMut<T>;
-    type IntoIter = AnchorIteratorMut<'a, T>;
-
-    fn into_iter(self) -> <Self as std::iter::IntoIterator>::IntoIter {
-        AnchorIteratorMut::new(self)
     }
 }
 
@@ -154,9 +153,25 @@ impl<'a, T> AnchorIteratorMut<'a, T> {
     }
 }
 
-impl<'a, T> Iterator for AnchorIteratorMut<'a, T> {
-    type Item = &'a mut ChunkMut<T>;
-    fn next(&mut self) -> Option<&'a mut ChunkMut<T>> {
+impl<'a, T> AnchorIteratorMut<'a, T> {
+    /// This method is sightly different from a regular iterators next method:
+    /// it takes &'b mut self instead of &mut self.
+    /// This forces the user to let go of each returned value before requesting the next.
+    ///
+    /// As such the following use is a compile-time error:
+    /// ```compile_fail
+    ///  let mut a: Anchor<u8> = Anchor::new_empty();
+    ///  let mut i: AnchorIteratorMut<_> = a.iter_mut();
+    ///  let n = i.next().unwrap();
+    ///  n.split(0);
+    ///  let n = i.next().unwrap();
+    ///  n.split(0);
+    ///  assert!(i.next().is_some()); //~ ERROR cannot borrow `i` as mutable more than once at a time
+    ///  n.push(3);
+    ///  assert!(i.next().is_none());
+    /// ```
+    /// Regular rust tests don't support compile_fail so this is a doc-test
+    pub fn next<'b>(&'b mut self) -> Option<&'b mut ChunkMut<T>> {
         match self.chunk {
             Pos::Start(chunk) => {
                 // we will momentarily return this chunk, keep it
@@ -170,19 +185,13 @@ impl<'a, T> Iterator for AnchorIteratorMut<'a, T> {
                 if chunk.is_null() {
                     None
                 } else {
-                    // we are doing the deref here to avoid creating two &mut
-                    // (one passed out from the last .next() call, one here)
-                    // im honestly not sure what this implies for correctness
-                    // still violates stacked borrows rule
-                    // (understandable, don't want the content of &mut to change)
-                    // so i might have to use shared references and Cells
-                    // but seeing that this
-                    // (mutating stuff that a &mut to exists from a pointer)
-                    // does not violate any _currently published_ safety constraints
-                    // im just gonna roll with it for now.
-                    // wished iterators would let you take &'a self not &self in next
+                    // the last returned &mut has been released when this is called
+                    // as required by the lifetime constraints on this next-method
+                    // so its safe to resolve to it.
                     let next = unsafe { (*chunk).next_hint as *mut Chunk<T> };
                     self.chunk = Pos::Inner(next);
+                    // next is by construction guaranteed to either be a valid reference or null
+                    // ChunkMut is repr(transparent) so this cast is fine
                     unsafe { (next as *mut ChunkMut<T>).as_mut() }
                 }
             }
@@ -207,15 +216,11 @@ fn iter_empty() {
 #[test]
 fn iter_mut() {
     let mut a: Anchor<u8> = Anchor::new_empty();
-    let mut i = (&mut a).into_iter();
+    let mut i: AnchorIteratorMut<_> = a.iter_mut();
     let n = i.next().unwrap();
     n.split(0);
     let n = i.next().unwrap();
     n.split(0);
     assert!(i.next().is_some());
-    // keeping the last element around after the next next() call
-    // might be causing ub under the stacked borrows proposal with my current
-    // implementation. not sure how to go about that yet.
-    n.push(3);
     assert!(i.next().is_none());
 }

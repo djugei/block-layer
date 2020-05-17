@@ -1,17 +1,13 @@
-use crate::chunk::Chunk;
-
-// fixme: tests for the iterator
+pub mod anchor;
+pub use anchor::Anchor;
 
 /*
+use crate::chunk::Chunk;
 /// holds a pointer to each individual chunk
 /// allowing random access to the chunks
 pub struct FlatIndex<T> {
     start: *mut Chunk<T>,
 }
-*/
-
-mod anchor;
-pub use anchor::Anchor;
 
 use core::mem::MaybeUninit;
 
@@ -21,3 +17,4 @@ use core::mem::MaybeUninit;
 pub struct MapIndex<'a, T> {
     map: &'a mut [MaybeUninit<Chunk<T>>],
 }
+*/
