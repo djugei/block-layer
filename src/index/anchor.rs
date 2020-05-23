@@ -1,6 +1,7 @@
-use crate::Chunk;
 use core::marker::PhantomData;
 use std::mem::MaybeUninit;
+
+type Chunk<T> = crate::Chunk<T, Option<Box<()>>>;
 
 /// Not really an index, just accesses the Chunks chained.
 /// Contains a pointer to the first Chunk and thats it.
@@ -13,34 +14,18 @@ use std::mem::MaybeUninit;
 ///
 /// Does not allocate until elements are actually pushed.
 pub struct Anchor<T> {
-    start: *mut Chunk<T>,
-}
-
-impl<T> Drop for Anchor<T> {
-    fn drop(&mut self) {
-        let mut ptr = self.start;
-        while !ptr.is_null() {
-            // only visiting each chunk once, and we own them,
-            // therefore no double-frees should happen.
-            let b = unsafe { Box::from_raw(ptr) };
-            ptr = b.next_hint as *mut _;
-        }
-    }
+    start: Option<Box<Chunk<T>>>,
 }
 
 impl<T> Anchor<T> {
     pub fn new() -> Self {
-        Self {
-            start: std::ptr::null_mut(),
-        }
+        Self { start: None }
     }
 
     /// creates a new Anchor containing an allocated, but empty chunk.
     pub fn new_empty() -> Self {
-        let b = Box::new(Chunk::new(MaybeUninit::uninit()));
-        Self {
-            start: Box::into_raw(b),
-        }
+        let start = Box::new(Chunk::new(MaybeUninit::uninit()));
+        Self { start: Some(start) }
     }
 
     /// The regular Iterator interface can not be implemented by
@@ -64,13 +49,14 @@ impl<'a, T> IntoIterator for &'a Anchor<T> {
 pub struct AnchorIterator<'a, T> {
     // we just keep the index around for lifetime reasons
     _index: PhantomData<&'a Anchor<T>>,
-    chunk: *const Chunk<T>,
+    chunk: Option<&'a Chunk<T>>,
 }
 
 impl<'a, T> AnchorIterator<'a, T> {
     pub fn new(index: &'a Anchor<T>) -> Self {
+        let chunk = index.start.as_ref().map(|b| b.as_ref());
         Self {
-            chunk: index.start,
+            chunk: chunk,
             _index: Default::default(),
         }
     }
@@ -79,12 +65,9 @@ impl<'a, T> AnchorIterator<'a, T> {
 impl<'a, T> Iterator for AnchorIterator<'a, T> {
     type Item = &'a Chunk<T>;
     fn next(&mut self) -> Option<&'a Chunk<T>> {
-        // this is safe Anchor owns the chunk
-        // and  we hold a ref to it so lifetimes work out
-        let chunk_ref = unsafe { self.chunk.as_ref() };
-        if let Some(chunk) = chunk_ref {
+        if let Some(chunk) = self.chunk {
             // inside a Anchor Chunks contain a pointer as their next_hint.
-            self.chunk = chunk.next_hint as *const _;
+            self.chunk = chunk.next_hint.as_ref().map(|b| b.as_ref());
             Some(chunk)
         } else {
             None
@@ -102,30 +85,45 @@ impl<T> ChunkMut<T> {
     /// allocates a new chunk
     /// puts pointer to new chunk in next_hint field of current chunk.
     pub fn split(&mut self, pos: usize) {
-        let chunk = Box::new(MaybeUninit::uninit());
-        let raw_ptr = Box::into_raw(chunk);
-        let id = raw_ptr as usize;
-
-        {
-            // this is safe because no one else has a &mut to this
-            let ptr_ref = unsafe { raw_ptr.as_mut() }.unwrap();
-            self.chunk.split(pos, id, ptr_ref);
-        }
-        // notice how we don't reconstruct the box, so the value is not being dropped
-        // and chunk does not contain a dangling reference.
+        let mut chunk = Box::new(MaybeUninit::uninit());
+        self.chunk.split(pos, chunk.as_mut());
+        // split guarantees initialization.
+        let mut chunk = unsafe { chunk.assume_init() };
+        // time to fix up the pointers
+        std::mem::swap(&mut self.chunk.next_hint, &mut chunk.next_hint);
+        self.chunk.next_hint = Some(chunk);
     }
 
+    /// push a new element to this chunk
+    /// if the current chunk it full a new chunk is created instead
+    /// and the element inserted into that.
     pub fn push(&mut self, element: T) {
         if let Some(element) = self.chunk.push(element) {
             self.split(self.chunk.len() - 1);
-            // this is safe, we just stored the pointer there, no other &mut to it exist.
-            let nextref = unsafe { (self.chunk.next_hint as *mut Chunk<T>).as_mut() }.unwrap();
+            // this unwrap won't panic since we just split, so we can guarantee that
+            // a next chunk exists.
+            let next_ref = self.chunk.next_hint.as_mut().unwrap().as_mut();
             // this will only fail if one element is bigger than a whole chunk
             // which would be pointless.
-            nextref.push(element).unwrap();
+            next_ref.push(element).unwrap();
         } else {
             // we are good, the first push worked
         }
+    }
+
+    pub fn has_next(&self) -> bool {
+        use crate::chunk::Link;
+        !self.chunk.next_hint.is_empty()
+    }
+}
+
+impl<'a, T> From<&'a mut Chunk<T>> for &'a mut ChunkMut<T> {
+    fn from(other: &'a mut Chunk<T>) -> Self {
+        let ptr = other as *mut _ as *mut ChunkMut<T>;
+        // this is safe, ChunkMut is transparent
+        // and very much written around the idea of
+        // being cast from/to Chunk
+        unsafe { ptr.as_mut().unwrap() }
     }
 }
 
@@ -136,23 +134,20 @@ pub struct AnchorIteratorMut<'a, T> {
     /// this is different from most iterators.
     /// we need that so if the chunk is modified and split
     /// this iterator still catches the newly created chunk
-    chunk: Pos<T>,
-}
-
-enum Pos<T> {
-    Start(*mut Chunk<T>),
-    Inner(*mut Chunk<T>),
+    chunk: Option<&'a mut Chunk<T>>,
+    first: bool,
 }
 
 impl<'a, T> AnchorIteratorMut<'a, T> {
     pub fn new(index: &'a mut Anchor<T>) -> Self {
+        let chunk = index.start.as_mut().map(|b| b.as_mut());
         Self {
-            chunk: Pos::Start(index.start),
+            chunk,
             _index: Default::default(),
+            first: true,
         }
     }
 }
-
 impl<'a, T> AnchorIteratorMut<'a, T> {
     /// This method is sightly different from a regular iterators next method:
     /// it takes &'b mut self instead of &mut self.
@@ -171,31 +166,104 @@ impl<'a, T> AnchorIteratorMut<'a, T> {
     ///  assert!(i.next().is_none());
     /// ```
     /// Regular rust tests don't support compile_fail so this is a doc-test
+    ///
+    /// using it in a loop works perfectly fine, even though "for" syntax is not supported
+    ///
+    /// ```
+    /// # use chunk_list::index::Anchor;
+    /// let mut a: Anchor<u8> = Anchor::new_empty();
+    /// let mut i = a.iter_mut();
+    /// while let Some(chunk) = i.next() {
+    ///     // your code here
+    /// }
+    /// ```
     pub fn next<'b>(&'b mut self) -> Option<&'b mut ChunkMut<T>> {
-        match self.chunk {
-            Pos::Start(chunk) => {
-                // we will momentarily return this chunk, keep it
-                // so we only look up what the next chunk is right before going there
-                self.chunk = Pos::Inner(chunk);
-                // this is safe Anchor owns the chunk
-                // and  we hold a ref to it so lifetimes work out
-                unsafe { (chunk as *mut ChunkMut<T>).as_mut() }
+        if self.chunk.is_some() {
+            if self.first {
+                // don't move forwards, just return
+                self.first = false;
+            } else {
+                // todo: this code feels overly complicated
+                let mut chunk = None;
+                std::mem::swap(&mut chunk, &mut self.chunk);
+                let chunk = chunk.unwrap();
+                let hint = chunk.next_hint.as_mut();
+                let hint = hint.map(|b| b.as_mut());
+                self.chunk = hint;
             }
-            Pos::Inner(chunk) => {
-                if chunk.is_null() {
-                    None
-                } else {
-                    // the last returned &mut has been released when this is called
-                    // as required by the lifetime constraints on this next-method
-                    // so its safe to resolve to it.
-                    let next = unsafe { (*chunk).next_hint as *mut Chunk<T> };
-                    self.chunk = Pos::Inner(next);
-                    // next is by construction guaranteed to either be a valid reference or null
-                    // ChunkMut is repr(transparent) so this cast is fine
-                    unsafe { (next as *mut ChunkMut<T>).as_mut() }
+            // todo: im 100% sure this can be expressed in a nicer way
+            if let Some(ref mut chunk) = self.chunk {
+                let chunk: &mut ChunkMut<T> = (*chunk).into();
+                Some(chunk)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+}
+// separating the non-iterator functions for clarity
+impl<'a, T> AnchorIteratorMut<'a, T> {
+    /// searches for needle in all the chunks past the current
+    ///
+    /// if there are repeats, any element might be found.
+    /// this is especially relevant if there are repeats across
+    /// a chunk.
+    ///
+    /// returns Ok(offset, pos) if an element was found
+    /// returns Err(offset, pos) if no element was found
+    ///
+    /// number is the offset of chunks from the first one
+    /// (how many times .next() was called)
+    /// pos is the position inside the chunk where the needle is,
+    /// or should be inserted.
+    ///
+    /// the search does a linear scan of the chunks first and then a binary search
+    /// within the matching chunk
+    ///
+    /// this will be able to return a reference to the chunk directly once polonius lands
+    /// not right now though
+    ///
+    /// since the iterator was moved to the chunk, you can get a reference from the iterators
+    /// current position
+    ///
+    /// todo: switch to polonius asap
+    /// todo: try harder to return the first match/stay in the first chunk
+    pub fn search<'b>(&'b mut self, needle: &T) -> Result<(usize, usize), (usize, usize)>
+    where
+        T: std::cmp::Ord,
+    {
+        let mut past_min = false;
+        let mut count = 0;
+        while let Some(chunk) = self.next() {
+            count += 1;
+            let (first, last) = match &chunk.chunk[..] {
+                [first, .., last] => (first, last),
+                [first] => (first, first),
+                _ => continue,
+            };
+
+            if needle >= first {
+                past_min = true;
+            }
+
+            if past_min && needle <= last {
+                // this is for polonius
+                let chunk: &mut ChunkMut<T> = &mut *chunk;
+                match chunk.chunk.binary_search(needle) {
+                    Ok(pos) => return Ok((count, pos)),
+                    Err(pos) => return Err((count, pos)),
                 }
             }
+
+            // last chunk, even if its not in here, it should be,
+            // right past the last element.
+            if !chunk.has_next() {
+                return Err((count, chunk.chunk.len()));
+            }
         }
+        unreachable!("search should terminate within the loop");
     }
 }
 

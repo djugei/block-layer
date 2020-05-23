@@ -2,6 +2,64 @@ use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::ops::DerefMut;
 
+pub trait Link<T: ?Sized> {
+    fn empty() -> Self
+    where
+        T: Sized;
+    fn is_empty(&self) -> bool
+    where
+        T: Sized;
+}
+
+impl<T: ?Sized> Link<T> for usize {
+    fn empty() -> Self {
+        usize::MAX
+    }
+    fn is_empty(&self) -> bool {
+        *self == usize::MAX
+    }
+}
+
+impl<T: ?Sized> Link<T> for Option<Box<T>> {
+    fn empty() -> Self {
+        None
+    }
+    fn is_empty(&self) -> bool {
+        self.is_none()
+    }
+}
+
+impl<T: ?Sized> Link<T> for *mut T {
+    fn empty() -> Self
+    where
+        T: Sized,
+    {
+        std::ptr::null_mut()
+    }
+    fn is_empty(&self) -> bool {
+        self.is_null()
+    }
+}
+
+// this is a hack to get around the lack of HKT in rust.
+pub trait LinkAdapter<T: ?Sized> {
+    type Link: Link<T>;
+}
+
+// what i _actually_ want to write is
+// for Option<Box>, i.e. a not fully specified type
+impl<T: ?Sized> LinkAdapter<T> for Option<Box<()>> {
+    type Link = Option<Box<T>>;
+}
+
+impl<T: ?Sized> LinkAdapter<T> for *mut () {
+    type Link = *mut T;
+}
+
+impl<T: ?Sized> LinkAdapter<T> for usize {
+    type Link = usize;
+}
+
 #[cfg(target_pointer_width = "64")]
 const PTR_SIZE: usize = 8;
 #[cfg(target_pointer_width = "32")]
@@ -21,22 +79,26 @@ const BUF_SIZE: usize = 4096 - 2 - PTR_SIZE;
 /// you should put the chunks into a container
 /// which then actually owns them.
 #[repr(C, align(4096))]
-pub struct Chunk<T> {
+pub struct Chunk<T, L>
+where
+    L: LinkAdapter<Self>,
+{
     // this is a hack to force alignment to be compatible with T
     _zst: [T; 0],
     /// where the user data is actually stored
     /// 4096 - 2 - 8
     buf: [u8; BUF_SIZE],
     len: u16,
-    // todo: figure out how to make this generic without infinite
-    // type recursion
     /// this is a pointer-sized hint on what the next chunk may be
     /// depending on usage this may be a pointer
     /// or an offset for example
-    pub(crate) next_hint: usize,
+    pub(crate) next_hint: L::Link,
 }
 
-impl<T> Chunk<T> {
+impl<T, L> Chunk<T, L>
+where
+    L: LinkAdapter<Self>,
+{
     /// Pass in an uninitialized chunk of memory
     /// get out a Chunk
     #[inline]
@@ -51,8 +113,16 @@ impl<T> Chunk<T> {
     /// After a call to initialize the whole struct ist guaranteed to be initialized.
     /// If the passed struct was partially initialized before, drops will not be called.
     pub fn initialize(store: &mut MaybeUninit<Self>) {
+        // this is not expressible in the type system yet
+        // so runtime-checks have to do
+        // they should be evaluated at compile time anyway
+        // so at least probably no runtime cost
         assert!(std::mem::size_of::<T>() <= BUF_SIZE);
         assert!(std::mem::align_of::<T>() <= 4096);
+
+        assert_eq!(std::mem::size_of::<L::Link>(), 8);
+        assert_eq!(std::mem::align_of::<L::Link>(), 8);
+
         // 1) get the offsets
         let store_ptr = store.as_mut_ptr() as *mut MaybeUninit<u8>;
         let buf_ptr = store_ptr;
@@ -68,7 +138,7 @@ impl<T> Chunk<T> {
         // 2) turn into the right pointer types
         let buf_ptr = buf_ptr as *mut u8;
         let len_ptr = len_ptr as *mut u16;
-        let next_ptr = next_ptr as *mut usize;
+        let next_ptr = next_ptr as *mut L::Link;
 
         // 3) initialize
         unsafe {
@@ -78,7 +148,7 @@ impl<T> Chunk<T> {
         }
         // the alignment must always work out because we don't allow for pointer sizes < 16
         unsafe { len_ptr.write(0u16) };
-        unsafe { next_ptr.write(0usize) };
+        unsafe { next_ptr.write(L::Link::empty()) };
 
         // buf has been zero-initialized
         // the length and the next hint have just been initialized
@@ -212,16 +282,25 @@ impl<T> Chunk<T> {
         values
     }
 
-    // todo: maybe this api is not great cause we need to pass the id and the thing
-    // at the same time. not a problem for offsets, but not so great for pointers.
-    // not sure how to fix that up though
     /// Split self at index.
     /// Everything < index stays in self, everything >= goes into other.
     /// Other will be overwritten and fully initialized.
     /// If other was partially initialized before those parts will be overwritten,
-    /// not dropped
-    /// if index > self.len() then this panics
-    pub fn split(&mut self, index: usize, other_id: usize, other: &mut MaybeUninit<Self>) {
+    /// not dropped.
+    /// If index > self.len() then this panics.
+    ///
+    /// Attention: this will not make self.next_hint point to other.
+    /// Nor will it make other.next_hint point to what self pointed to.
+    /// This is a drawback of abstracting over owning and referencing.
+    /// You will probably need to append something like:
+    ///
+    /// ```ignore
+    /// std::mem::swap(&mut self.next_hint, &mut other.next_hint);
+    /// // owned
+    /// self.next_hint = other;
+    /// //
+    /// ```
+    pub fn split(&mut self, index: usize, other: &mut MaybeUninit<Self>) {
         Self::initialize(&mut *other);
         // safe because initialize guarantees initialization
         let other: &mut Self = unsafe { other.get_mut() };
@@ -244,15 +323,14 @@ impl<T> Chunk<T> {
             self.len -= len as u16;
             other.len = len as u16;
         }
-
-        // fix up the hints:
-        // we need to point to other, other needs to point to our next
-        std::mem::swap(&mut self.next_hint, &mut other.next_hint);
-        self.next_hint = other_id;
+        // notice how the next_hint is not modified
     }
 }
 
-impl<T> Drop for Chunk<T> {
+impl<T, L> Drop for Chunk<T, L>
+where
+    L: LinkAdapter<Self>,
+{
     // gotta drop all initialized data
     fn drop(&mut self) {
         while let Some(_) = self.pop() {}
@@ -260,7 +338,10 @@ impl<T> Drop for Chunk<T> {
     // will not drop next!
 }
 
-impl<T> Deref for Chunk<T> {
+impl<T, L> Deref for Chunk<T, L>
+where
+    L: LinkAdapter<Self>,
+{
     type Target = [T];
     fn deref(&self) -> &Self::Target {
         let base = &self.buf as *const _ as *const T;
@@ -270,7 +351,10 @@ impl<T> Deref for Chunk<T> {
     }
 }
 
-impl<T> DerefMut for Chunk<T> {
+impl<T, L> DerefMut for Chunk<T, L>
+where
+    L: LinkAdapter<Self>,
+{
     fn deref_mut(&mut self) -> &mut Self::Target {
         let base = &mut self.buf as *mut _ as *mut T;
 
@@ -279,7 +363,10 @@ impl<T> DerefMut for Chunk<T> {
     }
 }
 
-impl<T: std::fmt::Debug> std::fmt::Debug for Chunk<T> {
+impl<T: std::fmt::Debug, L> std::fmt::Debug for Chunk<T, L>
+where
+    L: LinkAdapter<Self>,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let slice: &[T] = self;
         f.debug_list().entries(slice).finish()
@@ -288,14 +375,14 @@ impl<T: std::fmt::Debug> std::fmt::Debug for Chunk<T> {
 
 #[test]
 fn sizes() {
-    assert_eq!(std::mem::size_of::<Chunk<u8>>(), 4096);
+    assert_eq!(std::mem::size_of::<Chunk<u8, usize>>(), 4096);
 }
 
 #[test]
 fn push_pop() {
     let store = Box::new(MaybeUninit::uninit());
 
-    let mut chunk = Chunk::new(*store);
+    let mut chunk = Chunk::<_, usize>::new(*store);
     assert_eq!(chunk.capacity(), BUF_SIZE / std::mem::size_of::<usize>());
 
     for i in 0usize..chunk.capacity() {
@@ -313,7 +400,7 @@ fn push_pop() {
 fn insert_remove() {
     let store = Box::new(MaybeUninit::uninit());
 
-    let mut chunk = Chunk::new(*store);
+    let mut chunk = Chunk::<_, usize>::new(*store);
 
     for i in 0u128..(chunk.capacity() - 1) as u128 {
         assert_eq!(chunk.push(i), None);
@@ -337,7 +424,7 @@ fn insert_remove() {
 #[test]
 fn split() {
     let store = Box::new(MaybeUninit::uninit());
-    let mut chunk: Chunk<u128> = Chunk::new(*store);
+    let mut chunk: Chunk<u128, usize> = Chunk::new(*store);
     let capacity = chunk.capacity();
 
     // only test a few because miri isn't very fast
@@ -346,13 +433,13 @@ fn split() {
         .chain(std::iter::once(capacity - 1))
     {
         let store = Box::new(MaybeUninit::uninit());
-        let mut chunk = Chunk::new(*store);
+        let mut chunk = Chunk::<u128, usize>::new(*store);
         for i in 0u128..(chunk.capacity()) as u128 {
             assert_eq!(chunk.push(i), None);
         }
 
         let mut store = Box::new(MaybeUninit::uninit());
-        chunk.split(s, 0, &mut store);
+        chunk.split(s, &mut store);
         // split initiates so this is safe
         let mut new = unsafe { store.assume_init() };
 
@@ -367,7 +454,7 @@ fn split() {
     }
     // check that splits at 0 for 0-sized chunks also work.
     let mut store = Box::new(MaybeUninit::uninit());
-    chunk.split(0, 0, store.as_mut());
+    chunk.split(0, store.as_mut());
     let new = unsafe { store.assume_init() };
     assert_eq!(new.len(), chunk.len());
     assert_eq!(chunk.len(), 0);
@@ -377,10 +464,10 @@ fn split() {
 #[should_panic]
 fn split_oob() {
     let store = Box::new(MaybeUninit::uninit());
-    let mut chunk: Chunk<u128> = Chunk::new(*store);
+    let mut chunk: Chunk<u128, usize> = Chunk::new(*store);
 
     let mut store = Box::new(MaybeUninit::uninit());
-    chunk.split(1, 0, store.as_mut());
+    chunk.split(1, store.as_mut());
     // split initializes, so we need to drop
     let _new = unsafe { store.assume_init() };
 }
