@@ -44,20 +44,56 @@ impl<T: ?Sized> Link<T> for *mut T {
 // this is a hack to get around the lack of HKT in rust.
 pub trait LinkAdapter<T: ?Sized> {
     type Link: Link<T>;
+    type Resolver: ?Sized;
+    unsafe fn resolve<'a: 'c, 'b: 'c, 'c>(r: &'a Self::Resolver, l: &'b Self::Link) -> &'c T;
+    unsafe fn resolve_mut<'a: 'c, 'b: 'c, 'c>(
+        r: &'a mut Self::Resolver,
+        l: &'b mut Self::Link,
+    ) -> &'c mut T;
 }
 
 // what i _actually_ want to write is
 // for Option<Box>, i.e. a not fully specified type
 impl<T: ?Sized> LinkAdapter<T> for Option<Box<()>> {
     type Link = Option<Box<T>>;
+    type Resolver = ();
+    unsafe fn resolve<'a: 'c, 'b: 'c, 'c>(_r: &'a Self::Resolver, l: &'b Self::Link) -> &'c T {
+        l.as_ref().map(|b| b.as_ref()).unwrap()
+    }
+    unsafe fn resolve_mut<'a: 'c, 'b: 'c, 'c>(
+        _r: &'a mut Self::Resolver,
+        l: &'b mut Self::Link,
+    ) -> &'c mut T {
+        l.as_mut().map(|b| b.as_mut()).unwrap()
+    }
 }
 
 impl<T: ?Sized> LinkAdapter<T> for *mut () {
     type Link = *mut T;
+    type Resolver = ();
+    unsafe fn resolve<'a: 'c, 'b: 'c, 'c>(_r: &'a Self::Resolver, l: &'b Self::Link) -> &'c T {
+        l.as_ref().unwrap()
+    }
+    unsafe fn resolve_mut<'a: 'c, 'b: 'c, 'c>(
+        _r: &'a mut Self::Resolver,
+        l: &'b mut Self::Link,
+    ) -> &'c mut T {
+        l.as_mut().unwrap()
+    }
 }
 
-impl<T: ?Sized> LinkAdapter<T> for usize {
+impl<T: Sized> LinkAdapter<T> for usize {
     type Link = usize;
+    type Resolver = [T];
+    unsafe fn resolve<'a: 'c, 'b: 'c, 'c>(r: &'a Self::Resolver, l: &'b Self::Link) -> &'c T {
+        &r[*l]
+    }
+    unsafe fn resolve_mut<'a: 'c, 'b: 'c, 'c>(
+        r: &'a mut Self::Resolver,
+        l: &'b mut Self::Link,
+    ) -> &'c mut T {
+        &mut r[*l]
+    }
 }
 
 #[cfg(target_pointer_width = "64")]
