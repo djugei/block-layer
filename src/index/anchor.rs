@@ -191,16 +191,15 @@ impl<'a, T> AnchorIteratorMut<'a, T> {
                 let hint = hint.map(|b| b.as_mut());
                 self.chunk = hint;
             }
-            // todo: im 100% sure this can be expressed in a nicer way
-            if let Some(ref mut chunk) = self.chunk {
-                let chunk: &mut ChunkMut<T> = (*chunk).into();
-                Some(chunk)
-            } else {
-                None
-            }
+            self.chunk.as_mut().map(|c| (*c).into())
         } else {
             None
         }
+    }
+
+    /// returns the current chunk without advancing the iterator
+    pub fn get<'b>(&'b mut self) -> Option<&'b mut ChunkMut<T>> {
+        self.chunk.as_mut().map(|c| (*c).into())
     }
 }
 // separating the non-iterator functions for clarity
