@@ -44,56 +44,20 @@ impl<T: ?Sized> Link<T> for *mut T {
 // this is a hack to get around the lack of HKT in rust.
 pub trait LinkAdapter<T: ?Sized> {
     type Link: Link<T>;
-    type Resolver: ?Sized;
-    unsafe fn resolve<'a: 'c, 'b: 'c, 'c>(r: &'a Self::Resolver, l: &'b Self::Link) -> &'c T;
-    unsafe fn resolve_mut<'a: 'c, 'b: 'c, 'c>(
-        r: &'a mut Self::Resolver,
-        l: &'b mut Self::Link,
-    ) -> &'c mut T;
 }
 
 // what i _actually_ want to write is
 // for Option<Box>, i.e. a not fully specified type
 impl<T: ?Sized> LinkAdapter<T> for Option<Box<()>> {
     type Link = Option<Box<T>>;
-    type Resolver = ();
-    unsafe fn resolve<'a: 'c, 'b: 'c, 'c>(_r: &'a Self::Resolver, l: &'b Self::Link) -> &'c T {
-        l.as_ref().map(|b| b.as_ref()).unwrap()
-    }
-    unsafe fn resolve_mut<'a: 'c, 'b: 'c, 'c>(
-        _r: &'a mut Self::Resolver,
-        l: &'b mut Self::Link,
-    ) -> &'c mut T {
-        l.as_mut().map(|b| b.as_mut()).unwrap()
-    }
 }
 
 impl<T: ?Sized> LinkAdapter<T> for *mut () {
     type Link = *mut T;
-    type Resolver = ();
-    unsafe fn resolve<'a: 'c, 'b: 'c, 'c>(_r: &'a Self::Resolver, l: &'b Self::Link) -> &'c T {
-        l.as_ref().unwrap()
-    }
-    unsafe fn resolve_mut<'a: 'c, 'b: 'c, 'c>(
-        _r: &'a mut Self::Resolver,
-        l: &'b mut Self::Link,
-    ) -> &'c mut T {
-        l.as_mut().unwrap()
-    }
 }
 
-impl<T: Sized> LinkAdapter<T> for usize {
+impl<T: ?Sized> LinkAdapter<T> for usize {
     type Link = usize;
-    type Resolver = [T];
-    unsafe fn resolve<'a: 'c, 'b: 'c, 'c>(r: &'a Self::Resolver, l: &'b Self::Link) -> &'c T {
-        &r[*l]
-    }
-    unsafe fn resolve_mut<'a: 'c, 'b: 'c, 'c>(
-        r: &'a mut Self::Resolver,
-        l: &'b mut Self::Link,
-    ) -> &'c mut T {
-        &mut r[*l]
-    }
 }
 
 #[cfg(target_pointer_width = "64")]
@@ -104,6 +68,10 @@ const PTR_SIZE: usize = 4;
 const PTR_SIZE: usize = 2;
 
 const BUF_SIZE: usize = 4096 - 2 - PTR_SIZE;
+
+pub enum Pred<const EXP: bool> {}
+pub trait Sat {}
+impl Sat for Pred<true> {}
 
 /// a single, page-sized chunk.
 /// you can use this directly, or through a ChunkIndex
@@ -118,8 +86,8 @@ const BUF_SIZE: usize = 4096 - 2 - PTR_SIZE;
 pub struct Chunk<T, L>
 where
     L: LinkAdapter<Self>,
+    Pred<{ std::mem::size_of::<T>() <= BUF_SIZE }>: Sat,
 {
-    // this is a hack to force alignment to be compatible with T
     _zst: [T; 0],
     /// where the user data is actually stored
     /// 4096 - 2 - 8
@@ -134,6 +102,7 @@ where
 impl<T, L> Chunk<T, L>
 where
     L: LinkAdapter<Self>,
+    Pred<{ std::mem::size_of::<T>() <= BUF_SIZE }>: Sat,
 {
     /// Pass in an uninitialized chunk of memory
     /// get out a Chunk
@@ -148,7 +117,7 @@ where
 
     /// After a call to initialize the whole struct ist guaranteed to be initialized.
     /// If the passed struct was partially initialized before, drops will not be called.
-    pub fn initialize(store: &mut MaybeUninit<Self>) {
+    pub fn initialize(store: &mut MaybeUninit<Self>) -> &mut Self {
         // this is not expressible in the type system yet
         // so runtime-checks have to do
         // they should be evaluated at compile time anyway
@@ -191,6 +160,8 @@ where
         // phantom is a ZST
         // Chunk is repr(C)
         // so things are correctly initialized now and we are done.
+
+        unsafe { store.get_mut() }
     }
 
     /// pushes a value, unless the list is full
@@ -301,8 +272,6 @@ where
         }
     }
 
-    //todo: del, split
-
     pub fn as_uninit_slice(&self) -> &[MaybeUninit<T>] {
         // this is "safe" because we only transmute it to MaybeUninit
         // i.e. not actually doing anything.
@@ -336,10 +305,8 @@ where
     /// self.next_hint = other;
     /// //
     /// ```
-    pub fn split(&mut self, index: usize, other: &mut MaybeUninit<Self>) {
-        Self::initialize(&mut *other);
-        // safe because initialize guarantees initialization
-        let other: &mut Self = unsafe { other.get_mut() };
+    pub fn split<'a>(&mut self, index: usize, other: &'a mut MaybeUninit<Self>) -> &'a mut Self {
+        let other = Self::initialize(&mut *other);
         {
             let own = self.as_uninit_slice();
             let theirs = other.as_uninit_slice_mut();
@@ -360,6 +327,9 @@ where
             other.len = len as u16;
         }
         // notice how the next_hint is not modified
+
+        // other has been fully initialized
+        other
     }
 }
 
