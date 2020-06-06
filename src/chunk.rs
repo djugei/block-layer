@@ -212,7 +212,9 @@ where
         let has_space = len < self.capacity();
         if index_in_bounds && has_space {
             let values = self.as_uninit_slice_mut();
-            let insert_index = &mut values[index] as *mut MaybeUninit<T>;
+            // we just checked the index to be in bounds
+            let insert_index =
+                unsafe { (values as *mut [MaybeUninit<T>] as *mut MaybeUninit<T>).add(index) };
             // this is safe because the pointer is allowed to go one past
             // in which case this will copy 0 elements
             let copy_target = unsafe { insert_index.add(1) };
