@@ -69,10 +69,6 @@ const PTR_SIZE: usize = 2;
 
 const BUF_SIZE: usize = 4096 - 2 - PTR_SIZE;
 
-pub enum Pred<const EXP: bool> {}
-pub trait Sat {}
-impl Sat for Pred<true> {}
-
 /// a single, page-sized chunk.
 /// you can use this directly, or through a ChunkIndex
 /// if you need random access.
@@ -86,7 +82,6 @@ impl Sat for Pred<true> {}
 pub struct Chunk<T, L>
 where
     L: LinkAdapter<Self>,
-    Pred<{ std::mem::size_of::<T>() <= BUF_SIZE }>: Sat,
 {
     _zst: [T; 0],
     /// where the user data is actually stored
@@ -102,7 +97,6 @@ where
 impl<T, L> Chunk<T, L>
 where
     L: LinkAdapter<Self>,
-    Pred<{ std::mem::size_of::<T>() <= BUF_SIZE }>: Sat,
 {
     /// Pass in an uninitialized chunk of memory
     /// get out a Chunk
