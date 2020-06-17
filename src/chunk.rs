@@ -78,6 +78,7 @@ const BUF_SIZE: usize = 4096 - 2 - PTR_SIZE;
 /// it does not own the next chunk.
 /// you should put the chunks into a container
 /// which then actually owns them.
+#[derive(Clone)]
 #[repr(C, align(4096))]
 pub struct Chunk<T, L>
 where
@@ -332,6 +333,9 @@ where
 impl<T, L> Drop for Chunk<T, L>
 where
     L: LinkAdapter<Self>,
+    // i would like to only implement drop for types that actually need dropping
+    // but rust won't let me. could work around that with a wrapper type.
+    //T:Drop,
 {
     // gotta drop all initialized data
     fn drop(&mut self) {

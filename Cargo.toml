@@ -8,7 +8,11 @@ edition = "2018"
 
 [dependencies]
 
+[dev-dependencies]
+rand = "*"
 
 [profile.test]
 lto = true
 opt-level = 3
+
+

@@ -1,6 +1,11 @@
 pub mod anchor;
 pub use anchor::Anchor;
 
+pub mod freelist;
+pub use freelist::FreeList;
+
+pub mod slicelist;
+
 /*
 use crate::chunk::Chunk;
 /// holds a pointer to each individual chunk
