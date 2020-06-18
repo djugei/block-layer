@@ -1,4 +1,6 @@
 use crate::chunk::Link;
+use crate::index::slicelist::SliceIter;
+use crate::index::slicelist::SliceIterMut;
 use std::convert::TryInto;
 use std::mem::MaybeUninit;
 
@@ -16,7 +18,7 @@ pub struct FreeList<'a, T> {
     phantom: std::marker::PhantomData<T>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub struct Entry {
     start: u32,
     len: u32,
@@ -68,6 +70,17 @@ impl EntryChunk {
         let chunk = chunk.as_mut().unwrap();
         let chunk = chunk.get_mut();
         chunk
+    }
+}
+impl<'a, 'b, T> IntoIterator for &'b FreeList<'a, T>
+where
+    'b: 'a,
+{
+    type Item = (usize, &'a Chunk<Entry>);
+    type IntoIter = SliceIter<'a, Entry>;
+    fn into_iter(self) -> <Self as std::iter::IntoIterator>::IntoIter {
+        // this is ok, the freelist is always in a consistent state
+        unsafe { SliceIter::from_byteslice(&*self.chunks, self.initial) }
     }
 }
 
@@ -139,36 +152,27 @@ impl<'a, T> FreeList<'a, T> {
     /// used before calling this.
     ///
     /// will panic if trying to free something that is not marked as used.
+    // fixme: move entire code into inner non-unsafe fn so unsafe is more visible
     pub unsafe fn free(&mut self, pos: u32, count: u32) {
-        //fixme: there is a lot of chunked-list functionality woven in here
-        //maybe it would be smart to separate that out if possible
-        //but there may be some lifetime woes
-        // search for pos
-        // part 1: skip any chunk that is clearly not important
-        let mut cur = (None, self.initial);
-        while cur.1 != Link::<Chunk<u8>>::empty() {
-            let chunk = &self.chunks[cur.1];
-            // just iterating over existing chunks, have all been initialized previously
-            let chunk = EntryChunk::from_u8(chunk);
-
-            // have we arrived at the relevant chunk?
+        let mut free_chunk = None;
+        let mut iter = SliceIterMut::from_byteslice(self.chunks, self.initial);
+        while let Some((id, chunk)) = iter.next() {
+            // generally empty chunks are forbidden
+            // but its fine if its the initial chunk
+            // (happens only when memory is completely exhausted)
             if let Some(Entry { start, len }) = chunk.last() {
+                // have we arrived at the relevant chunk?
                 if start + len >= pos {
+                    free_chunk = Some((id, chunk));
                     break;
                 }
             }
-            cur = (Some(cur.1), chunk.next_hint);
-            continue;
+            free_chunk = Some((id, chunk));
         }
-        // reset cur to pre if we reached the last chunk
-        if cur.1 == Link::<Chunk<u8>>::empty() {
-            cur = (None, cur.0.unwrap());
-        }
-        let cur = cur.1;
+
+        let (id, chunk) = free_chunk.expect("freelist contains no chunks at all this is invalid");
+        let next = iter.next();
         // part2: search inside the chunk
-        let chunk = &self.chunks[cur];
-        // just iterating over existing chunks, have all been initialized previously
-        let chunk = EntryChunk::from_u8(chunk);
         let insert_pos = chunk.binary_search_by_key(&pos, |e| e.start).unwrap_err();
 
         // insert: 4 options
@@ -192,20 +196,19 @@ impl<'a, T> FreeList<'a, T> {
         let expected_start = pos + count;
         let post_adj = if insert_pos == chunk.len() {
             // we need to check the next chunk
-            if chunk.next_hint == Link::<Chunk<Entry>>::empty() {
-                PostAdj::No
-            } else {
-                let next = &self.chunks[chunk.next_hint];
-                let next = EntryChunk::from_u8(next);
-                if let Some(Entry {
-                    start: _expected_start,
-                    ..
-                }) = next.first()
-                {
-                    PostAdj::Next
-                } else {
-                    PostAdj::No
+            match &next {
+                Some(next) => {
+                    if let Some(Entry {
+                        start: _expected_start,
+                        ..
+                    }) = next.1.first()
+                    {
+                        PostAdj::Next
+                    } else {
+                        PostAdj::No
+                    }
                 }
+                None => PostAdj::No,
             }
         } else {
             match chunk.get(insert_pos) {
@@ -220,14 +223,10 @@ impl<'a, T> FreeList<'a, T> {
         // for borrow-checking concerns
         match (pre_adj, post_adj) {
             (true, PostAdj::No) => {
-                let chunk = &mut self.chunks[cur];
-                let chunk = EntryChunk::from_u8_mut(chunk);
                 // just append to previous entry
                 chunk[insert_pos - 1].len += count;
             }
             (false, PostAdj::Same) => {
-                let chunk = &mut self.chunks[cur];
-                let chunk = EntryChunk::from_u8_mut(chunk);
                 // just merge into next entry
                 let e = &mut chunk[insert_pos];
                 e.start = pos;
@@ -235,17 +234,12 @@ impl<'a, T> FreeList<'a, T> {
             }
             (false, PostAdj::Next) => {
                 // merge into next
-                let chunk = &self.chunks[cur];
-                let chunk = EntryChunk::from_u8(chunk);
-                let next = &mut self.chunks[chunk.next_hint];
-                let next = EntryChunk::from_u8_mut(next);
+                let (_next_id, next) = next.unwrap();
                 let e = next.first_mut().unwrap();
                 e.start = pos;
                 e.len += count;
             }
             (true, PostAdj::Same) => {
-                let chunk = &mut self.chunks[cur];
-                let chunk = EntryChunk::from_u8_mut(chunk);
                 let post_entry = chunk.remove(insert_pos).unwrap();
                 // merge all into pre
                 chunk[insert_pos - 1].len += count + post_entry.len;
@@ -253,42 +247,19 @@ impl<'a, T> FreeList<'a, T> {
             (true, PostAdj::Next) => {
                 // this case is especially important, as it is the only one that allows removal of
                 // freelist-pages. not overly complicated though.
-                let chunk = &self.chunks[cur];
-                let chunk = EntryChunk::from_u8(chunk);
-
-                let next_hint = chunk.next_hint;
-
-                let next = &mut self.chunks[next_hint];
-                let next = EntryChunk::from_u8_mut(next);
-
+                let (next_id, next) = next.unwrap();
                 let post_entry = next.remove(0).unwrap();
                 let rem = if next.len() == 0 { true } else { false };
 
-                // this is super awkward, i could work around it with split_at_mut but thats
-                // probably even more awkward
-                let chunk = &mut self.chunks[cur];
-                let chunk = EntryChunk::from_u8_mut(chunk);
-
                 chunk[insert_pos - 1].len += count + post_entry.len;
 
-                // fixme: check for correctness i was kinda tired
-                // fixme: move entire code into inner non-unsafe fn so unsafe is more visible
                 if rem {
-                    // now we are left with an entirely empty page in next_hint
-                    // time to free the freelist
-                    let next = &mut self.chunks[next_hint];
-                    let next = EntryChunk::from_u8_mut(next);
-
                     let next_next = next.next_hint;
 
                     std::ptr::drop_in_place(next as *mut _);
-
-                    let chunk = &mut self.chunks[cur];
-                    let chunk = EntryChunk::from_u8_mut(chunk);
-
                     chunk.next_hint = next_next;
 
-                    self.free(next_hint as u32, 1);
+                    self.free(next_id as u32, 1);
                 } else {
                     // it would be possible to balance if this and next are very un-equally full
                     // or merge if both are quite empty
@@ -298,12 +269,9 @@ impl<'a, T> FreeList<'a, T> {
             }
             (false, PostAdj::No) => {
                 // this is the most complicated case: add a new entry, possibly allocating a chunk
-                // which ofc throws all calculations off. if we guarantee non-empty pages we can "steal" a page from the
-                // existing frees in this chunk, or we can steal one from the just-freed ones
-                // stealing from a one-sized free will result in it being gone completely
-
-                let chunk = &mut self.chunks[cur];
-                let chunk = EntryChunk::from_u8_mut(chunk);
+                // but we can't really allocate right now since that would invalidate all
+                // the work we just did.
+                // we _can_ just quickly "steal" some space from the full chunk though.
 
                 let entry = Entry {
                     start: pos,
@@ -330,7 +298,9 @@ impl<'a, T> FreeList<'a, T> {
                             as *mut MaybeUninit<Chunk<Entry>>)
                             .as_mut()
                             .unwrap();
-                        let chunk = &mut self.chunks[cur];
+                        // this re-borrow is kinda hard to avoid
+                        // -possilbe with split_mut- but still annoying
+                        let chunk = &mut self.chunks[id];
                         let chunk = EntryChunk::from_u8_mut(chunk);
                         // split
                         let new = chunk.split(insert_pos, newchunk_ref);
@@ -357,49 +327,38 @@ impl<'a, T> FreeList<'a, T> {
     ///
     /// todo: add option to prefer exact match
     pub fn allocate(&mut self, count: u32) -> Result<usize, (usize, u32)> {
-        // chunk, in-chunk, len
-        let mut max = (0, 0, 0);
-        let mut cur = self.initial;
-        while cur != Link::<Chunk<u8>>::empty() {
-            let chunk = &self.chunks[cur];
-            // by construction we made sure that initial is pointing to a valid entry chunk
-            // and that the chunk is in fact initialized
-            let chunk = unsafe { EntryChunk::from_u8(chunk) };
-
-            match chunk.find_space(count) {
-                Ok(pos) => {
-                    max = (cur, pos, count);
-                    break;
-                }
-                Err((pos, avail)) => {
-                    if avail > max.2 {
-                        max = (cur, pos, avail);
-                    }
-                }
-            }
-            cur = chunk.next_hint;
-        }
-
-        if max.2 == 0 {
+        // list is initialized
+        use crate::index::slicelist::IterExt;
+        use std::iter::repeat;
+        let iter = unsafe { SliceIterMut::<Entry>::from_byteslice(self.chunks, self.initial) };
+        let (chunk_id, in_chunk, free_entry) = if let Some(e) = iter
+            .flat_map(|(id, slice)| repeat(id).zip(slice.iter_mut().enumerate()))
+            .map(|(chunk, (in_chunk, entry))| (chunk, in_chunk, entry))
+            .max_by_key_with_cutoff(|(_, _, e)| e.len, count)
+        {
+            e
+        } else {
             return Err((0, 0));
+        };
+
+        let to_alloc = count.min(free_entry.len);
+
+        let start = free_entry.start as usize;
+
+        free_entry.allocate(to_alloc);
+
+        if free_entry.len == 0 {
+            // todo: can me removed by returning chunks in iterator
+            // and changing the max to return a position
+            let chunk = &mut self.chunks[chunk_id];
+            let chunk = unsafe { EntryChunk::from_u8_mut(chunk) };
+            chunk.remove(in_chunk);
         }
 
-        // at this point we found the best match for the request, time to allocate it.
-        let chunk = &mut self.chunks[max.0];
-        let chunk = unsafe { EntryChunk::from_u8_mut(chunk) };
-
-        let entry = &mut chunk[max.1];
-        let start = entry.start as usize;
-        entry.allocate(max.2);
-
-        if entry.len == 0 {
-            chunk.remove(max.1);
-        }
-
-        if max.2 == count {
+        if to_alloc == count {
             Ok(start)
         } else {
-            Err((start, max.2))
+            Err((start, to_alloc))
         }
     }
 }
@@ -407,15 +366,10 @@ impl<'a, T> FreeList<'a, T> {
 #[test]
 fn alloc_free() {
     fn count_free_chunks<'a, T>(l: &FreeList<'a, T>) -> usize {
-        let mut number = 0;
-        let mut current = l.initial;
-        while current != Link::<Chunk<u8>>::empty() {
-            let chunk = &l.chunks[current];
-            let chunk = unsafe { EntryChunk::from_u8(chunk) };
-            number += chunk.iter().map(|e| e.len).sum::<u32>() as usize;
-            current = chunk.next_hint;
-        }
-        number
+        l.into_iter()
+            .flat_map(|(_, e)| std::ops::Deref::deref(e))
+            .map(|e| e.len as usize)
+            .sum::<usize>()
     };
 
     fn check_disjunct<'a, T>(l: &FreeList<'a, T>) {
