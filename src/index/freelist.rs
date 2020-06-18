@@ -90,6 +90,10 @@ impl<'a, T> FreeList<'a, T> {
     /// so you can safely put data in front of initial
     /// and later manually mark it as used.
     pub fn new(c: &'a mut [MaybeUninit<Chunk<u8>>], initial: u32) -> Self {
+        let len: u32 = c
+            .len()
+            .try_into()
+            .expect("passed slice has more than 32bit chunks");
         let base = &mut c[initial as usize];
         // should be safe, chunk has way higher alignment than entry
         let base = unsafe {
@@ -103,10 +107,6 @@ impl<'a, T> FreeList<'a, T> {
             start: 0,
             len: initial,
         });
-        let len: u32 = c
-            .len()
-            .try_into()
-            .expect("passed slice has more than 32bit chunks");
         let remain = len.saturating_sub(initial + 1);
         if remain > 0 {
             base.push(Entry {
