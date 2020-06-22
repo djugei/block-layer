@@ -328,6 +328,13 @@ where
         // other has been fully initialized
         other
     }
+
+    pub fn has_next(&self) -> bool
+    where
+        L::Link: Eq,
+    {
+        self.next_hint != L::Link::empty()
+    }
 }
 
 impl<T, L> Drop for Chunk<T, L>

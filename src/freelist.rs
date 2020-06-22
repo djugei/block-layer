@@ -1,6 +1,5 @@
-use crate::chunk::Link;
-use crate::index::slicelist::SliceIter;
-use crate::index::slicelist::SliceIterMut;
+use crate::slicelist::SliceIter;
+use crate::slicelist::SliceIterMut;
 use std::convert::TryInto;
 use std::mem::MaybeUninit;
 
@@ -81,6 +80,16 @@ where
     fn into_iter(self) -> <Self as std::iter::IntoIterator>::IntoIter {
         // this is ok, the freelist is always in a consistent state
         unsafe { SliceIter::from_byteslice(&*self.chunks, self.initial) }
+    }
+}
+
+impl<'a, T> std::fmt::Debug for FreeList<'a, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        let mut list = f.debug_list();
+        for (id, chunk) in self.into_iter() {
+            list.entry(&(id, chunk));
+        }
+        list.finish()
     }
 }
 
@@ -328,7 +337,7 @@ impl<'a, T> FreeList<'a, T> {
     /// todo: add option to prefer exact match
     pub fn allocate(&mut self, count: u32) -> Result<usize, (usize, u32)> {
         // list is initialized
-        use crate::index::slicelist::IterExt;
+        use crate::slicelist::IterExt;
         use std::iter::repeat;
         let iter = unsafe { SliceIterMut::<Entry>::from_byteslice(self.chunks, self.initial) };
         let (chunk_id, in_chunk, free_entry) = if let Some(e) = iter
@@ -374,10 +383,7 @@ fn alloc_free() {
 
     fn check_disjunct<'a, T>(l: &FreeList<'a, T>) {
         let mut last_free = 0;
-        let mut current = l.initial;
-        while current != Link::<Chunk<u8>>::empty() {
-            let chunk = &l.chunks[current];
-            let chunk = unsafe { EntryChunk::from_u8(chunk) };
+        for (_id, chunk) in l.into_iter() {
             for e in &chunk[..] {
                 let ok = e.start >= last_free;
                 if !ok {
@@ -386,7 +392,60 @@ fn alloc_free() {
                 assert!(ok);
                 last_free = e.start + e.len;
             }
-            current = chunk.next_hint
+        }
+    }
+
+    fn alloc<R: Rng>(allocations: &mut Vec<Entry>, freelist: &mut FreeList<u8>, mut rng: R) {
+        'outer: loop {
+            // maybe use an exponential distribution here
+            let mut size = rng.gen_range(1, 50);
+            let pre = count_free_chunks(&freelist);
+            'retry: loop {
+                let alloc = freelist.allocate(size);
+                check_disjunct(&freelist);
+                match alloc {
+                    Ok(pos) => {
+                        allocations.push(Entry {
+                            start: pos as u32,
+                            len: size,
+                        });
+                        break 'retry;
+                    }
+                    Err((pos, len)) => {
+                        if len == 0 {
+                            break 'outer;
+                        };
+                        allocations.push(Entry {
+                            start: pos as u32,
+                            len,
+                        });
+                        size -= len;
+                    }
+                }
+            }
+            let post = count_free_chunks(&freelist);
+            dbg!(&freelist, size, allocations.last());
+            assert_eq!(pre - post, size as usize);
+        }
+    }
+
+    fn free<R: Rng>(
+        allocations: &mut Vec<Entry>,
+        freelist: &mut FreeList<u8>,
+        n: usize,
+        mut rng: R,
+    ) {
+        // free in a random order to hit edge cases
+        for _ in 0..n {
+            let alloc = rng.gen_range(0, allocations.len());
+            let alloc = allocations.remove(alloc);
+            let pre = count_free_chunks(&freelist);
+            unsafe {
+                freelist.free(alloc.start, alloc.len);
+            }
+            let post = count_free_chunks(&freelist);
+            assert_eq!(pre + (alloc.len as usize), post);
+            check_disjunct(&freelist);
         }
     }
 
@@ -399,52 +458,25 @@ fn alloc_free() {
     use rand;
     use rand::Rng;
     let mut rng = rand::thread_rng();
+    alloc(&mut allocations, &mut freelist, &mut rng);
+    let len = allocations.len();
+    free(&mut allocations, &mut freelist, len, &mut rng);
 
-    'outer: loop {
-        // maybe use an exponential distribution here
-        let mut size = rng.gen_range(1, 50);
-        let pre = count_free_chunks(&freelist);
-        'retry: loop {
-            let alloc = freelist.allocate(size);
-            check_disjunct(&freelist);
-            match alloc {
-                Ok(pos) => {
-                    allocations.push(Entry {
-                        start: pos as u32,
-                        len: size,
-                    });
-                    break 'retry;
-                }
-                Err((pos, len)) => {
-                    if len == 0 {
-                        break 'outer;
-                    };
-                    allocations.push(Entry {
-                        start: pos as u32,
-                        len,
-                    });
-                    size -= len;
-                }
-            }
-        }
-        let post = count_free_chunks(&freelist);
-        assert_eq!(pre - post, size as usize);
-    }
-
-    // free in a random order to hit edge cases
-    while allocations.len() != 0 {
-        let alloc = rng.gen_range(0, allocations.len());
-        let alloc = allocations.remove(alloc);
-        let pre = count_free_chunks(&freelist);
-        unsafe {
-            freelist.free(alloc.start, alloc.len);
-        }
-        let post = count_free_chunks(&freelist);
-        assert_eq!(pre + (alloc.len as usize), post);
-        check_disjunct(&freelist);
-    }
     let chunk = &freelist.chunks[freelist.initial];
     let chunk = unsafe { EntryChunk::from_u8(chunk) };
-    assert_eq!(chunk.next_hint, Link::<Chunk<u8>>::empty());
+    assert!(!chunk.has_next());
+    assert_eq!(chunk.len(), 2);
+
+    alloc(&mut allocations, &mut freelist, &mut rng);
+    let len = allocations.len();
+    free(&mut allocations, &mut freelist, len / 2, &mut rng);
+    // try allocation after partial deallocation
+    alloc(&mut allocations, &mut freelist, &mut rng);
+    let len = allocations.len();
+    free(&mut allocations, &mut freelist, len, &mut rng);
+
+    let chunk = &freelist.chunks[freelist.initial];
+    let chunk = unsafe { EntryChunk::from_u8(chunk) };
+    assert!(!chunk.has_next());
     assert_eq!(chunk.len(), 2);
 }

@@ -29,5 +29,6 @@
 mod chunk;
 pub use chunk::Chunk;
 
-pub mod index;
-//pub use index::FlatIndex;
+pub mod anchor;
+pub mod freelist;
+pub mod slicelist;
