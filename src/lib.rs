@@ -1,6 +1,7 @@
 #![feature(maybe_uninit_extra)]
 #![feature(maybe_uninit_ref)]
 #![feature(new_uninit)]
+#![feature(option_unwrap_none)]
 //! A List of singly-linked Chunks.
 //!
 //! Each Chunk contains multiple Elements of the stored data type.

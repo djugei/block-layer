@@ -170,7 +170,7 @@ impl<'a, T> AnchorIteratorMut<'a, T> {
     /// using it in a loop works perfectly fine, even though "for" syntax is not supported
     ///
     /// ```
-    /// # use chunk_list::index::Anchor;
+    /// # use chunk_list::anchor::Anchor;
     /// let mut a: Anchor<u8> = Anchor::new_empty();
     /// let mut i = a.iter_mut();
     /// while let Some(chunk) = i.next() {
