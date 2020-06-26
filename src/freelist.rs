@@ -332,17 +332,46 @@ impl<'a, T> FreeList<'a, T> {
     pub fn allocate(&mut self, count: u32) -> Result<usize, (usize, u32)> {
         // list is initialized
         use crate::slicelist::IterExt;
-        use std::iter::repeat;
         let iter = unsafe { SliceIterMut::<Entry>::from_byteslice(self.chunks, self.initial) };
-        let (chunk_id, in_chunk, free_entry) = if let Some(e) = iter
-            .flat_map(|(id, slice)| repeat(id).zip(slice.iter_mut().enumerate()))
-            .map(|(chunk, (in_chunk, entry))| (chunk, in_chunk, entry))
-            .max_by_key_with_cutoff(|(_, _, e)| e.len, count)
-        {
+        let mut iter = iter.filter_map(|(c_id, chunk)| {
+            let max = chunk
+                .iter_mut()
+                .enumerate()
+                .max_by_key_with_cutoff(|(_, e)| e.len, count)?;
+            let max = (max.1.len, max.0);
+            Some((c_id, chunk, max))
+        });
+
+        let mut max = if let Some(e) = iter.next() {
             e
         } else {
             return Err((0, 0));
         };
+
+        let mut pre = None;
+
+        // this is not actually a loop this is a block that i can jump out of.
+        // maybe i can express this nicer? with a do-while loop maybe? not sure
+        'goto: loop {
+            if max.2 .0 >= count {
+                break 'goto;
+            }
+            for (c_id, chunk, in_chunk) in iter {
+                if in_chunk.0 > max.2 .0 {
+                    max = (c_id, chunk, in_chunk);
+                    if max.2 .0 >= count {
+                        break 'goto;
+                    }
+                }
+
+                pre = Some(c_id);
+            }
+
+            break 'goto;
+        }
+
+        let (chunk_id, chunk, in_chunk) = max;
+        let free_entry = &mut chunk[in_chunk.1];
 
         let to_alloc = count.min(free_entry.len);
 
@@ -351,11 +380,45 @@ impl<'a, T> FreeList<'a, T> {
         free_entry.allocate(to_alloc);
 
         if free_entry.len == 0 {
-            // todo: can me removed by returning chunks in iterator
-            // and changing the max to return a position
-            let chunk = &mut self.chunks[chunk_id];
-            let chunk = unsafe { EntryChunk::from_u8_mut(chunk) };
-            chunk.remove(in_chunk);
+            chunk.remove(in_chunk.1);
+        }
+
+        // remove chunk if empty
+        if chunk.len() == 0 {
+            if let Some(pre) = pre {
+                let next_hint = chunk.next_hint;
+                // nothing references the chunk any more, time to drop it
+                unsafe {
+                    std::ptr::drop_in_place(chunk as *mut _);
+                }
+                // pre is a valid chunk, by definition
+                let pre_ref = unsafe {
+                    let pre_ref = &mut self.chunks[pre];
+                    let pre_ref = (pre_ref as *mut _ as *mut MaybeUninit<Chunk<Entry>>)
+                        .as_mut()
+                        .unwrap();
+                    pre_ref.get_mut()
+                };
+                pre_ref.next_hint = next_hint;
+                unsafe {
+                    self.free(chunk_id as u32, 1);
+                }
+            } else {
+                // this is the first chunk, there is no previous one
+                // so we just change what we consider the initial chunk
+                use crate::chunk::Link;
+                // always keep at least one chunk, otherwise we can never
+                // free anything again
+                if !Link::<Chunk<Entry>>::is_empty(&chunk.next_hint) {
+                    self.initial = chunk.next_hint;
+                    unsafe {
+                        std::ptr::drop_in_place(chunk as *mut _);
+                    }
+                    unsafe {
+                        self.free(chunk_id as u32, 1);
+                    }
+                }
+            }
         }
 
         if to_alloc == count {
@@ -474,10 +537,11 @@ fn alloc_free() {
     dbg!(&freelist);
     // can reach a "metastable" state right now
     // where allocations are only used to keep freelist chunks
-    //let chunk = &freelist.chunks[freelist.initial];
-    //let chunk = unsafe { EntryChunk::from_u8(chunk) };
-    //assert!(!chunk.has_next());
-    //assert_eq!(chunk.len(), 2);
+    let chunk = &freelist.chunks[freelist.initial];
+    let chunk = unsafe { EntryChunk::from_u8(chunk) };
+    assert!(!chunk.has_next());
+    assert_eq!(chunk.len(), 2);
+    assert_eq!(count_free_chunks(&freelist), n_chunks - 1);
 
     alloc(&mut allocations, &mut freelist, &mut rng);
     let len = allocations.len();
@@ -488,8 +552,9 @@ fn alloc_free() {
     free(&mut allocations, &mut freelist, len, &mut rng);
 
     dbg!(&freelist);
-    //let chunk = &freelist.chunks[freelist.initial];
-    //let chunk = unsafe { EntryChunk::from_u8(chunk) };
-    //assert!(!chunk.has_next());
-    //assert_eq!(chunk.len(), 2);
+    let chunk = &freelist.chunks[freelist.initial];
+    let chunk = unsafe { EntryChunk::from_u8(chunk) };
+    assert!(!chunk.has_next());
+    assert_eq!(chunk.len(), 2);
+    assert_eq!(count_free_chunks(&freelist), n_chunks - 1);
 }
