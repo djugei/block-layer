@@ -5,7 +5,14 @@ use std::mem::MaybeUninit;
 
 type Chunk<T> = crate::chunk::Chunk<T, usize>;
 
-//todo: utilize slicelist for freelist
+// todo: i fell like im missing an abstraction layer here
+// this mixes being a freelist and being a... list
+// so block allocator and chunk-list functions mixed
+// i should try and split them up.
+//
+// todo: instead of actively allocating to maintain the freelist itself
+// i should probably return an error asking for an allocation
+// so it can be embedded in other context
 pub struct FreeList<'a, T> {
     initial: usize,
     // ok so this is kinda inaccurate, actually i want a chunk<ANY, usize> but thats not
