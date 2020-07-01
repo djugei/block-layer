@@ -1,5 +1,5 @@
-use crate::chunk::Link;
-type Chunk<T> = crate::chunk::Chunk<T, usize>;
+use crate::base_chunk::Link;
+type Chunk<T> = crate::base_chunk::Chunk<T, usize>;
 use std::mem::MaybeUninit;
 
 pub struct SliceIter<'a, T> {

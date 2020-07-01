@@ -27,8 +27,8 @@
 //! Storing the chunks in a Memory-mapped file will also be supported,
 //! tough the indexing will look a bit more complicated.
 
-mod chunk;
-pub use chunk::Chunk;
+mod base_chunk;
+pub use base_chunk::Chunk;
 
 pub mod anchor;
 pub mod freelist;

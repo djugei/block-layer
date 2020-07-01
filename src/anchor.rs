@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use std::mem::MaybeUninit;
 
-type Chunk<T> = crate::Chunk<T, Option<Box<()>>>;
+type Chunk<T> = crate::base_chunk::Chunk<T, Option<Box<()>>>;
 
 /// Not really an index, just accesses the Chunks chained.
 /// Contains a pointer to the first Chunk and thats it.
@@ -112,7 +112,7 @@ impl<T> ChunkMut<T> {
     }
 
     pub fn has_next(&self) -> bool {
-        use crate::chunk::Link;
+        use crate::base_chunk::Link;
         !self.chunk.next_hint.is_empty()
     }
 }

@@ -3,7 +3,7 @@ use crate::slicelist::SliceIterMut;
 use std::convert::TryInto;
 use std::mem::MaybeUninit;
 
-type Chunk<T> = crate::chunk::Chunk<T, usize>;
+type Chunk<T> = crate::base_chunk::Chunk<T, usize>;
 
 // todo: i fell like im missing an abstraction layer here
 // this mixes being a freelist and being a... list
@@ -413,7 +413,7 @@ impl<'a, T> FreeList<'a, T> {
             } else {
                 // this is the first chunk, there is no previous one
                 // so we just change what we consider the initial chunk
-                use crate::chunk::Link;
+                use crate::base_chunk::Link;
                 // always keep at least one chunk, otherwise we can never
                 // free anything again
                 if !Link::<Chunk<Entry>>::is_empty(&chunk.next_hint) {
