@@ -337,6 +337,55 @@ where
     }
 }
 
+// todo: use these in downstream implementations
+impl<T, L> Chunk<T, L>
+where
+    L: LinkAdapter<Self, Link = usize>,
+{
+    //TODO: maybe take (&mut[], self_index, other_index, split_at) instead
+    pub fn split_usize<'a>(
+        &mut self,
+        index: usize,
+        other: &'a mut MaybeUninit<Self>,
+        other_id: usize,
+    ) -> &'a mut Self {
+        let other = self.split(index, other);
+        other.next_hint = self.next_hint;
+        self.next_hint = other_id;
+        other
+    }
+}
+
+impl<T, L> Chunk<T, L>
+where
+    L: LinkAdapter<Self, Link = Option<Box<Self>>>,
+{
+    pub fn split_box<'a>(&mut self, index: usize, mut other: Box<MaybeUninit<Self>>) {
+        let other_mut = self.split(index, &mut other);
+        other_mut.next_hint = self.next_hint.take();
+        // swap guarantees initialization
+        let other = unsafe { other.assume_init() };
+        self.next_hint = Some(other);
+    }
+}
+
+impl<T, L> Chunk<T, L>
+where
+    L: LinkAdapter<Self, Link = *mut Self>,
+{
+    pub fn split_mut<'a>(
+        &mut self,
+        index: usize,
+        other: &'a mut MaybeUninit<Self>,
+    ) -> &'a mut Self {
+        let other_mut = self.split(index, other);
+        other_mut.next_hint = self.next_hint;
+        // swap guarantees initialization
+        self.next_hint = other_mut as *mut _;
+        other_mut
+    }
+}
+
 impl<T, L> Drop for Chunk<T, L>
 where
     L: LinkAdapter<Self>,
