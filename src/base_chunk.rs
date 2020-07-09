@@ -110,6 +110,20 @@ where
         unsafe { store.assume_init() }
     }
 
+    /// only call with valid pointers
+    pub unsafe fn len_ptr(s: *mut Self) -> *mut u16 {
+        let s = s as *mut u8;
+        let s = s.add(BUF_SIZE);
+        s as _
+    }
+
+    /// only call with valid pointers
+    pub unsafe fn next_hint(s: *mut Self) -> *mut L::Link {
+        let s = s as *mut u8;
+        let s = s.add(BUF_SIZE + 2);
+        s as _
+    }
+
     /// After a call to initialize the whole struct ist guaranteed to be initialized.
     /// If the passed struct was partially initialized before, drops will not be called.
     pub fn initialize(store: &mut MaybeUninit<Self>) -> &mut Self {
@@ -207,7 +221,7 @@ where
 
     /// inserts element at index, shifting all following elements up by one.
     /// if there is not enough space in this chunk the element is returned
-    pub fn insert(&mut self, index: usize, element: T) -> Option<T> {
+    pub fn insert(&mut self, index: usize, element: T) -> Result<&mut T, T> {
         let len = self.len as usize;
         let index_in_bounds = index <= len;
         let has_space = len < self.capacity();
@@ -229,9 +243,14 @@ where
             values[index].write(element);
 
             self.len += 1;
-            None
+
+            let values = self.as_uninit_slice_mut();
+            let v = &mut values[index] as *mut MaybeUninit<T> as *mut T;
+            // this is ok, we literally just initialized this
+            let v = unsafe { v.as_mut().unwrap() };
+            Ok(v)
         } else {
-            Some(element)
+            Err(element)
         }
     }
 

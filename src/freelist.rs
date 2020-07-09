@@ -1,5 +1,5 @@
-use crate::slicelist::SliceIter;
-use crate::slicelist::SliceIterMut;
+use crate::slicelist::Cursor;
+use crate::slicelist::CursorMut;
 use std::convert::TryInto;
 use std::mem::MaybeUninit;
 
@@ -83,10 +83,10 @@ where
     'b: 'a,
 {
     type Item = (usize, &'a Chunk<Entry>);
-    type IntoIter = SliceIter<'a, Entry>;
+    type IntoIter = Cursor<'a, Entry>;
     fn into_iter(self) -> <Self as std::iter::IntoIterator>::IntoIter {
         // this is ok, the freelist is always in a consistent state
-        unsafe { SliceIter::from_byteslice(&*self.chunks, self.initial) }
+        unsafe { Cursor::from_byteslice(&*self.chunks, self.initial) }
     }
 }
 
@@ -171,7 +171,7 @@ impl<'a, T> FreeList<'a, T> {
     // todo: move entire code into inner non-unsafe fn so unsafe is more visible
     pub unsafe fn free(&mut self, pos: u32, count: u32) {
         let mut free_chunk = None;
-        let mut iter = SliceIterMut::from_byteslice(self.chunks, self.initial);
+        let mut iter = CursorMut::from_byteslice(self.chunks, self.initial);
         while let Some((id, chunk)) = iter.next() {
             // generally empty chunks are forbidden
             // but its fine if its the initial chunk
@@ -288,9 +288,9 @@ impl<'a, T> FreeList<'a, T> {
 
                 match succ {
                     // we are good, chunk still had space left
-                    None => {}
+                    Ok(_) => {}
                     // oh no, we gotta do something
-                    Some(entry) => {
+                    Err(entry) => {
                         // by definition the chunk is full, so allocate one element from the last
                         // entry
                         let last = &mut chunk.last_mut().unwrap();
@@ -339,7 +339,7 @@ impl<'a, T> FreeList<'a, T> {
     pub fn allocate(&mut self, count: u32) -> Result<usize, (usize, u32)> {
         // list is initialized
         use crate::slicelist::IterExt;
-        let iter = unsafe { SliceIterMut::<Entry>::from_byteslice(self.chunks, self.initial) };
+        let iter = unsafe { CursorMut::<Entry>::from_byteslice(self.chunks, self.initial) };
         let mut iter = iter.filter_map(|(c_id, chunk)| {
             let max = chunk
                 .iter_mut()

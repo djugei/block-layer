@@ -2,12 +2,13 @@ use crate::base_chunk::Link;
 type Chunk<T> = crate::base_chunk::Chunk<T, usize>;
 use std::mem::MaybeUninit;
 
-pub struct SliceIter<'a, T> {
+#[derive(Clone, Copy)]
+pub struct Cursor<'a, T> {
     data: &'a [MaybeUninit<Chunk<T>>],
     current: usize,
 }
 
-impl<'a, T> SliceIter<'a, T> {
+impl<'a, T> Cursor<'a, T> {
     /// unsafety: make sure start is actually an initialzed chunk
     /// of the right type and only (recursively) next_hint-points to initialized chunks
     pub unsafe fn new(data: &'a [MaybeUninit<Chunk<T>>], start: usize) -> Self {
@@ -30,7 +31,7 @@ impl<'a, T> SliceIter<'a, T> {
     }
 }
 
-impl<'a, T> Iterator for SliceIter<'a, T> {
+impl<'a, T> Iterator for Cursor<'a, T> {
     type Item = (usize, &'a Chunk<T>);
     fn next(&mut self) -> std::option::Option<<Self as std::iter::Iterator>::Item> {
         if self.current == Link::<Chunk<u8>>::empty() {
@@ -46,12 +47,12 @@ impl<'a, T> Iterator for SliceIter<'a, T> {
     }
 }
 
-pub struct SliceIterMut<'a, T> {
+pub struct CursorMut<'a, T> {
     data: &'a mut [MaybeUninit<Chunk<T>>],
     current: usize,
 }
 
-impl<'a, T> SliceIterMut<'a, T> {
+impl<'a, T> CursorMut<'a, T> {
     /// unsafety: make sure start is actually an initialzed chunk
     /// of the right type and only (recursively) next_hint-points to initialized chunks
     /// and never has any loops
@@ -75,9 +76,22 @@ impl<'a, T> SliceIterMut<'a, T> {
             current: start,
         }
     }
+
+    /// Creates a "clone" of this Cursor, allowing you to move forward
+    /// with the return value of this function
+    /// and then snap back to where you called it.
+    pub fn reborrow<'b>(&'a mut self) -> CursorMut<'b, T>
+    where
+        'a: 'b,
+    {
+        CursorMut {
+            current: self.current,
+            data: &mut *self.data,
+        }
+    }
 }
 
-impl<'a, T> Iterator for SliceIterMut<'a, T> {
+impl<'a, T> Iterator for CursorMut<'a, T> {
     type Item = (usize, &'a mut Chunk<T>);
     fn next(&mut self) -> std::option::Option<<Self as std::iter::Iterator>::Item> {
         if self.current == Link::<Chunk<u8>>::empty() {
