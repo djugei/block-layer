@@ -221,6 +221,7 @@ where
 
     /// inserts element at index, shifting all following elements up by one.
     /// if there is not enough space in this chunk the element is returned
+    /// also returns the element if the index is out of bounds
     pub fn insert(&mut self, index: usize, element: T) -> Result<&mut T, T> {
         let len = self.len as usize;
         let index_in_bounds = index <= len;

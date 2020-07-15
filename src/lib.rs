@@ -32,6 +32,7 @@ pub use base_chunk::Chunk;
 
 pub mod anchor;
 pub mod freelist;
+pub mod rle;
 pub mod slicelist;
 pub mod sorted_list;
 pub mod superblock;
