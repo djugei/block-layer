@@ -1,8 +1,9 @@
 [package]
-name = "chunk-list"
+name = "block-layer"
 version = "0.1.0"
 authors = ["djugei <ddjugei@gmail.com>"]
 edition = "2018"
+repository = "https://github.com/djugei/block-layer"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
