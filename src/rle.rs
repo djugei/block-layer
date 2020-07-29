@@ -130,9 +130,31 @@ impl<'s> RleList<'s> {
         todo!()
     }
 
-    /// actually allocated size might be smaller than requested
-    /// you can call again until entry.len == 0
-    pub fn alloc(&mut self, size: u32) -> Entry {
+    /// returns an entry. its len might be smaller than requested
+    /// if no continious space could be found.
+    /// you can call again to satisfy your requests until you get an error,
+    /// which signifies exhaustion.
+    pub fn alloc(&mut self, size: u32) -> Result<Entry, ()> {
+        /*
+                use crate::slicelist::CursorMut;
+                use crate::slicelist::IterExt;
+                //todo: need to make the cursor superblock-compatible
+                let iter = unsafe { CursorMut::<Entry>::from_byteslice(self.chunks, self.initial) };
+                let mut iter = iter.filter_map(|(c_id, chunk)| {
+                    let max = chunk
+                        .iter_mut()
+                        .enumerate()
+                        .max_by_key_with_cutoff(|(_, e)| e.len, count)?;
+                    let max = (max.1.len, max.0);
+                    Some((c_id, chunk, max))
+                });
+
+                let mut max = if let Some(e) = iter.next() {
+                    e
+                } else {
+                    return Err(());
+                };
+        */
         todo!()
     }
 }

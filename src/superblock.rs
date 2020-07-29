@@ -77,4 +77,11 @@ impl Superblock {
         let c = self.c as *mut Chunk<T> as *mut MaybeUninit<Chunk<T>>;
         c.add(pos).as_ref().unwrap()
     }
+
+    /// safety: uphold all safety guarantees of all the contained data, including the superblock
+    /// this is easiest done by not accessing anything except things you explicitly have a pointer
+    /// to.
+    pub unsafe fn as_mut(&self) -> *mut [Chunk<u8>] {
+        self.c
+    }
 }
